@@ -1,21 +1,18 @@
 import streamlit as st
 
-st.set_page_config(page_title="Dashboard GDS Logística", layout="wide")
+st.set_page_config(page_title="Dashboard GDS", layout="wide")
+
 st.title("📊 Dashboard de Pagamento - GDS Logística")
 
-st.markdown("""
-### 🔑 Configure as Credenciais do Google Cloud
+st.success("✅ App carregado com sucesso!")
 
-Para usar o dashboard, siga estes passos:
+st.markdown("""
+## 🔑 Próximas Etapas:
 
 1. **Clique em Settings** ⚙️ (canto superior direito)
-2. **Selecione "Secrets"**
-3. **Cole seu JSON do Google Cloud**
+2. **Vá em Secrets**
+3. **Cole suas credenciais do Google Cloud**
 4. **Clique em Save**
 
-Pronto! O app vai recarregar automaticamente.
-
----
-
-**Aguardando configuração...** ⏳
+O dashboard vai carregar automaticamente!
 """)
