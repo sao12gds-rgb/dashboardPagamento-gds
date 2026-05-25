@@ -4,7 +4,6 @@ import pandas as pd
 import gspread
 from google.oauth2.service_account import Credentials
 from datetime import datetime
-from googleapiclient.discovery import build
 
 st.set_page_config(page_title="Dashboard GDS Logística", layout="wide")
 st.title("📊 Dashboard de Pagamento - GDS Logística")
@@ -22,33 +21,35 @@ try:
         ID_PLANILHA = "17LU-Z0xjxPaJ_3gnUd79NvzpF3P3hKTHBTIROZXbv2M"
         workbook = client.open_by_key(ID_PLANILHA)
         
-        # Lê CADASTRO (com gspread normal)
+        # Lê CADASTRO
         df_cadastro = pd.DataFrame(workbook.worksheet("CADASTRO").get_all_records())
         
-        # Lê LANCAMENTOS usando Google Sheets API (para pegar VALORES das fórmulas)
-        sheets_service = build('sheets', 'v4', credentials=creds)
+        # Lê LANCAMENTOS usando get_all_values (não as fórmulas)
+        lancamentos_sheet = workbook.worksheet("LANCAMENTOS")
+        valores_brutos = lancamentos_sheet.get_all_values()
         
-        result = sheets_service.spreadsheets().values().get(
-            spreadsheetId=ID_PLANILHA,
-            range='LANCAMENTOS!A:Z',
-            valueRenderOption='FORMATTED_VALUE'  # ← ISTO RETORNA OS VALORES CALCULADOS
-        ).execute()
-        
-        valores = result.get('values', [])
-        
-        if len(valores) < 2:
+        if len(valores_brutos) < 2:
             st.error("❌ Nenhum dado na aba LANCAMENTOS")
         else:
-            headers = [str(h).strip().upper() for h in valores[0]]
-            dados = valores[1:]
+            headers = [str(h).strip().upper() for h in valores_brutos[0]]
+            dados = valores_brutos[1:]
             
-            # Criar DataFrame
-            df_lancamentos = pd.DataFrame(dados, columns=headers[:len(headers)])
+            df_lancamentos = pd.DataFrame(dados, columns=headers)
             
-            # Converter coluna DATA
+            # CONVERTER TODAS AS COLUNAS NUMÉRICAS
+            colunas_numericas = ['QTD_ENTREGAS', 'VALOR_UNITARIO', 'VALOR_EXCEDENTE', 'VALOR_ADICIONAL', 'VALOR_DESCONTO', 'VALOR_TOTAL_LINHA']
+            
+            for col in colunas_numericas:
+                if col in df_lancamentos.columns:
+                    df_lancamentos[col] = df_lancamentos[col].apply(
+                        lambda x: pd.to_numeric(
+                            str(x).replace('R$', '').replace(',', '.').strip(),
+                            errors='coerce'
+                        ) if x else 0
+                    ).fillna(0)
+            
+            # Converter DATA
             df_lancamentos['DATA'] = pd.to_datetime(df_lancamentos['DATA'], errors='coerce')
-            
-            # Extrai mês/ano
             df_lancamentos['MES_ANO'] = df_lancamentos['DATA'].dt.strftime('%m/%Y')
             df_lancamentos['MES_REFERENCIA'] = df_lancamentos['MES_ANO']
             
@@ -70,14 +71,6 @@ try:
                 how='left'
             )
             
-            # Conversão de valores numéricos
-            for col in ['QTD_ENTREGAS', 'VALOR_UNITARIO', 'VALOR_EXCEDENTE', 'VALOR_ADICIONAL', 'VALOR_DESCONTO', 'VALOR_TOTAL_LINHA']:
-                if col in df_lancamentos.columns:
-                    df_lancamentos[col] = pd.to_numeric(
-                        df_lancamentos[col].astype(str).str.replace(',', '.').str.replace('R$', '', regex=False).str.strip(),
-                        errors='coerce'
-                    ).fillna(0)
-            
             # Filtros
             with st.sidebar:
                 st.header("🔧 Filtros")
@@ -92,7 +85,7 @@ try:
                 entregadores = sorted(df_filtro['NOME_ENTREGADOR'].unique())
                 entregador = st.selectbox("Entregador:", entregadores)
             
-            # Filtra dados do entregador
+            # Filtra dados
             df_entregador = df_lancamentos[
                 (df_lancamentos['MES_REFERENCIA'] == mes) &
                 (df_lancamentos['QUINZENA'] == quinzena) &
@@ -139,15 +132,11 @@ try:
                     
                     elif tipo_lanc == "ROTA FECHADA":
                         rota_fechada += valor_total
-                        rotas_fechadas_lista.append({
-                            'cep': cep if cep else '',
-                            'valor': valor_total
-                        })
+                        rotas_fechadas_lista.append({'cep': cep if cep else '', 'valor': valor_total})
                     
                     elif tipo_lanc == "DESCONTO":
                         if v_desc == 0 and valor_total < 0:
                             descontos += abs(valor_total)
-                    
                     else:
                         if v_adic == 0 and valor_total > 0:
                             adicionais += valor_total
