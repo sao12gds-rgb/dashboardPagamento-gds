@@ -1,12 +1,7 @@
 import streamlit as st
 import pandas as pd
-from reportlab.lib.pagesizes import letter
-from reportlab.lib import colors
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib.units import inch
-from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+from fpdf import FPDF
 from io import BytesIO
-from datetime import datetime
 import gspread
 from google.oauth2.service_account import Credentials
 
@@ -26,14 +21,14 @@ try:
         ID_PLANILHA = "17LU-Z0xjxPaJ_3gnUd79NvzpF3P3hKTHBTIROZXbv2M"
         workbook = client.open_by_key(ID_PLANILHA)
         
-        # Lê CADASTRO (entregadores com CNPJ)
+        # Lê CADASTRO
         df_cadastro = pd.DataFrame(workbook.worksheet("CADASTRO").get_all_records())
         
         # Lê LANCAMENTOS
         df_lancamentos = pd.DataFrame(workbook.worksheet("LANCAMENTOS").get_all_records())
         df_lancamentos['MES_REFERENCIA'] = df_lancamentos['MES_REFERENCIA'].str.split('/').str[0]
         
-        # Merge para adicionar CNPJ
+        # Merge CNPJ
         df_lancamentos = df_lancamentos.merge(
             df_cadastro[['NOME_ENTREGADOR', 'CNPJ']], 
             on='NOME_ENTREGADOR', 
@@ -92,101 +87,84 @@ try:
             
             # Função para gerar PDF
             def gerar_recibo_pdf(df, entregador_nome, cnpj, mes_ref, quinzena_ref):
-                buffer = BytesIO()
-                doc = SimpleDocTemplate(buffer, pagesize=letter, 
-                                       rightMargin=0.4*inch, leftMargin=0.4*inch, 
-                                       topMargin=0.4*inch, bottomMargin=0.4*inch)
-                elements = []
-                styles = getSampleStyleSheet()
+                pdf = FPDF()
+                pdf.add_page()
+                pdf.set_font("Arial", "B", 16)
                 
                 # Título
-                title = Paragraph("<b>RECIBO DE PAGAMENTO</b>", styles['Heading1'])
-                elements.append(title)
-                elements.append(Spacer(1, 0.1*inch))
+                pdf.cell(0, 10, "RECIBO DE PAGAMENTO", ln=True, align="C")
+                pdf.ln(5)
                 
-                # Informações do entregador
-                info_data = [
-                    ["ENTREGADOR:", entregador_nome],
-                    ["CNPJ:", cnpj if pd.notna(cnpj) else "N/A"],
-                    ["PERÍODO:", f"{mes_ref} - {quinzena_ref}"],
-                ]
-                info_table = Table(info_data, colWidths=[1.3*inch, 3.7*inch])
-                info_table.setStyle(TableStyle([
-                    ('FONTNAME', (0, 0), (0, -1), 'Helvetica-Bold'),
-                    ('FONTSIZE', (0, 0), (-1, -1), 10),
-                    ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-                    ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
-                ]))
-                elements.append(info_table)
-                elements.append(Spacer(1, 0.15*inch))
+                # Informações
+                pdf.set_font("Arial", "B", 10)
+                pdf.cell(40, 8, "ENTREGADOR:", 0)
+                pdf.set_font("Arial", "", 10)
+                pdf.cell(0, 8, entregador_nome, ln=True)
+                
+                pdf.set_font("Arial", "B", 10)
+                pdf.cell(40, 8, "CNPJ:", 0)
+                pdf.set_font("Arial", "", 10)
+                pdf.cell(0, 8, str(cnpj) if pd.notna(cnpj) else "N/A", ln=True)
+                
+                pdf.set_font("Arial", "B", 10)
+                pdf.cell(40, 8, "PERÍODO:", 0)
+                pdf.set_font("Arial", "", 10)
+                pdf.cell(0, 8, f"{mes_ref} - {quinzena_ref}", ln=True)
+                
+                pdf.ln(3)
                 
                 # Resumo por CEP
-                elements.append(Paragraph("<b>RESUMO OPERACIONAL</b>", styles['Heading3']))
-                resumo_cep = df[df['TIPO_LANCAMENTO'] == 'ENTREGA'].groupby('CEP').size().reset_index(name='QTD')
-                resumo_data = [["CEP", "QTD ENTREGAS"]]
-                for _, row in resumo_cep.iterrows():
-                    resumo_data.append([str(row['CEP']), str(int(row['QTD']))])
+                pdf.set_font("Arial", "B", 10)
+                pdf.cell(0, 8, "RESUMO OPERACIONAL", ln=True)
                 
-                resumo_table = Table(resumo_data, colWidths=[2*inch, 2*inch])
-                resumo_table.setStyle(TableStyle([
-                    ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
-                    ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-                    ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-                    ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-                    ('FONTSIZE', (0, 0), (-1, -1), 9),
-                    ('GRID', (0, 0), (-1, -1), 1, colors.black),
-                    ('BOTTOMPADDING', (0, 0), (-1, 0), 6),
-                ]))
-                elements.append(resumo_table)
-                elements.append(Spacer(1, 0.15*inch))
+                resumo = df[df['TIPO_LANCAMENTO'] == 'ENTREGA'].groupby('CEP').size().reset_index(name='QTD')
+                pdf.set_font("Arial", "B", 9)
+                pdf.cell(80, 7, "CEP", 1)
+                pdf.cell(40, 7, "QTD ENTREGAS", 1, ln=True)
                 
-                # Resumo financeiro
+                pdf.set_font("Arial", "", 9)
+                for _, row in resumo.iterrows():
+                    pdf.cell(80, 7, str(row['CEP']), 1)
+                    pdf.cell(40, 7, str(int(row['QTD'])), 1, ln=True)
+                
+                pdf.ln(3)
+                
+                # Resumo Financeiro
+                pdf.set_font("Arial", "B", 10)
+                pdf.cell(0, 8, "RESUMO FINANCEIRO", ln=True)
+                
                 total_valor = df['VALOR_TOTAL_LINHA'].sum()
                 total_adicionais = df['VALOR_ADICIONAL'].sum() if 'VALOR_ADICIONAL' in df.columns else 0
                 total_descontos = df['VALOR_DESCONTO'].sum() if 'VALOR_DESCONTO' in df.columns else 0
                 
-                elements.append(Paragraph("<b>RESUMO FINANCEIRO</b>", styles['Heading3']))
-                financeiro_data = [
-                    ["TOTAL POR CEP", f"R$ {total_valor:.2f}"],
-                    ["ADICIONAIS", f"R$ {total_adicionais:.2f}"],
-                    ["DESCONTOS", f"R$ {total_descontos:.2f}"],
-                    ["TOTAL A RECEBER", f"R$ {total_valor:.2f}"],
-                ]
+                pdf.set_font("Arial", "", 10)
+                pdf.cell(120, 8, "TOTAL POR CEP:", 0)
+                pdf.cell(0, 8, f"R$ {total_valor:.2f}", ln=True, align="R")
                 
-                financeiro_table = Table(financeiro_data, colWidths=[3*inch, 1.5*inch])
-                financeiro_table.setStyle(TableStyle([
-                    ('FONTNAME', (0, 0), (-1, -1), 'Helvetica'),
-                    ('FONTSIZE', (0, 0), (-1, -1), 10),
-                    ('ALIGN', (0, 0), (0, -1), 'LEFT'),
-                    ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
-                    ('BACKGROUND', (0, -1), (-1, -1), colors.lightgrey),
-                    ('FONTNAME', (0, -1), (-1, -1), 'Helvetica-Bold'),
-                    ('LINEBELOW', (0, -2), (-1, -2), 2, colors.black),
-                    ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
-                    ('TOPPADDING', (0, 0), (-1, -1), 6),
-                ]))
-                elements.append(financeiro_table)
-                elements.append(Spacer(1, 0.3*inch))
+                pdf.cell(120, 8, "ADICIONAIS:", 0)
+                pdf.cell(0, 8, f"R$ {total_adicionais:.2f}", ln=True, align="R")
+                
+                pdf.cell(120, 8, "DESCONTOS:", 0)
+                pdf.cell(0, 8, f"R$ {total_descontos:.2f}", ln=True, align="R")
+                
+                pdf.set_font("Arial", "B", 10)
+                pdf.cell(120, 8, "TOTAL A RECEBER:", 0)
+                pdf.cell(0, 8, f"R$ {total_valor:.2f}", ln=True, align="R")
+                
+                pdf.ln(5)
                 
                 # Assinatura
-                assinatura_data = [
-                    ["ASSINATURA", "DATA"],
-                    ["_________________________", "_________________________"],
-                ]
-                assinatura_table = Table(assinatura_data, colWidths=[2.5*inch, 2*inch])
-                assinatura_table.setStyle(TableStyle([
-                    ('FONTNAME', (0, 0), (-1, -1), 'Helvetica'),
-                    ('FONTSIZE', (0, 0), (-1, -1), 9),
-                    ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-                    ('TOPPADDING', (0, 1), (-1, -1), 20),
-                ]))
-                elements.append(assinatura_table)
+                pdf.set_font("Arial", "", 9)
+                pdf.cell(90, 8, "ASSINATURA", 0, align="C")
+                pdf.cell(0, 8, "DATA", ln=True, align="C")
                 
-                doc.build(elements)
-                buffer.seek(0)
-                return buffer
+                pdf.cell(90, 20, "_________________", 0, align="C")
+                pdf.cell(0, 20, "_________________", ln=True, align="C")
+                
+                pdf_bytes = pdf.output()
+                return BytesIO(pdf_bytes)
             
-            # Botão para gerar e download do PDF
+            # Botão para gerar PDF
             col_btn1, col_btn2 = st.columns(2)
             with col_btn1:
                 if st.button("📄 Gerar Recibo PDF", use_container_width=True):
@@ -194,7 +172,7 @@ try:
                     pdf_buffer = gerar_recibo_pdf(df_filtrado, entregador, cnpj, mes, quinzena)
                     
                     st.download_button(
-                        label="⬇️ Baixar Recibo",
+                        label="⬇️ Baixar Recibo em PDF",
                         data=pdf_buffer,
                         file_name=f"Recibo_{entregador.replace(' ', '_')}_{mes}_{quinzena}.pdf",
                         mime="application/pdf",
@@ -206,5 +184,4 @@ try:
         raise Exception("Credenciais não encontradas")
         
 except Exception as e:
-    st.error(f"❌ Erro ao conectar: {str(e)}")
-    st.info("Verifique se as credenciais estão configuradas corretamente nos Secrets.")
+    st.error(f"❌ Erro: {str(e)}")
