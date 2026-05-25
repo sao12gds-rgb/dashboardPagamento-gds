@@ -27,6 +27,18 @@ try:
         df_lancamentos = pd.DataFrame(workbook.worksheet("LANCAMENTOS").get_all_records())
         df_lancamentos['MES_REFERENCIA'] = df_lancamentos['MES_REFERENCIA'].str.split('/').str[0].str.strip()
         
+        # Encontra a coluna de nome no CADASTRO (primeira coluna não vazia)
+        col_nome_cadastro = None
+        for col in df_cadastro.columns:
+            if 'NOME' in col.upper() or 'ENTREGADOR' in col.upper():
+                col_nome_cadastro = col
+                break
+        if col_nome_cadastro is None:
+            col_nome_cadastro = df_cadastro.columns[0]
+        
+        # Renomeia para padronizar
+        df_cadastro = df_cadastro.rename(columns={col_nome_cadastro: 'NOME_ENTREGADOR'})
+        
         # Merge CNPJ
         df_lancamentos = df_lancamentos.merge(
             df_cadastro[['NOME_ENTREGADOR', 'CNPJ']], 
