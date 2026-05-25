@@ -4,6 +4,7 @@ import pandas as pd
 import gspread
 from google.oauth2.service_account import Credentials
 from datetime import datetime
+from io import BytesIO
 
 st.set_page_config(page_title="Dashboard GDS Logística", layout="wide")
 st.title("📊 Dashboard de Pagamento - GDS Logística")
@@ -76,118 +77,29 @@ try:
         # FILTROS (SÓ MÊS E QUINZENA)
         with st.sidebar:
             st.header("🔧 Filtros")
-            meses = sorted(df_lancamentos['MES_REFERENCIA'].dropna().unique())
-            mes = st.selectbox("Mês:", meses)
+            
+            # Formata meses para exibição (SETEMBRO/2026)
+            meses_unicos = sorted(df_lancamentos['MES_REFERENCIA'].dropna().unique())
+            meses_display = {mes: f"SETEMBRO/{mes.split('/')[1]}" if "09" in mes else f"JULHO/{mes.split('/')[1]}" if "07" in mes else mes for mes in meses_unicos}
+            
+            mes = st.selectbox(
+                "Mês:",
+                meses_unicos,
+                format_func=lambda x: meses_display.get(x, x)
+            )
             
             df_mes = df_lancamentos[df_lancamentos['MES_REFERENCIA'] == mes]
             quinzenas = sorted(df_mes['QUINZENA'].unique())
             quinzena = st.selectbox("Quinzena:", quinzenas)
         
-        # Filtra por QUINZENA INTEIRA (não entregador individual)
+        # Filtra por QUINZENA INTEIRA
         df_quinzena = df_lancamentos[
             (df_lancamentos['MES_REFERENCIA'] == mes) &
             (df_lancamentos['QUINZENA'] == quinzena)
         ].copy()
         
         if len(df_quinzena) > 0:
-            # ===== RESUMO POR ENTREGADOR =====
-            resumo_entregadores = []
-            
-            for entregador in sorted(df_quinzena['NOME_ENTREGADOR'].unique()):
-                df_ent = df_quinzena[df_quinzena['NOME_ENTREGADOR'] == entregador]
-                
-                # CÁLCULOS (mesmo da lógica do Apps Script)
-                mapa_cep_entrega = {}
-                mapa_cep_coleta = {}
-                total_cep = 0
-                adicionais = 0
-                descontos = 0
-                rota_fechada = 0
-                
-                for idx, row in df_ent.iterrows():
-                    tipo_lanc = str(row.get('TIPO_LANCAMENTO', '')).upper().strip()
-                    cep = str(row.get('CEP', '')).strip()
-                    qtd = float(row.get('QTD_ENTREGAS', 0) or 0)
-                    v_unit = float(row.get('VALOR_UNITARIO', 0) or 0)
-                    v_exc = float(row.get('VALOR_EXCEDENTE', 0) or 0)
-                    v_adic = float(row.get('VALOR_ADICIONAL', 0) or 0)
-                    v_desc = float(row.get('VALOR_DESCONTO', 0) or 0)
-                    valor_total = float(row.get('VALOR_TOTAL_LINHA', 0) or 0)
-                    
-                    adicionais += v_adic
-                    descontos += v_desc
-                    
-                    if tipo_lanc == "ENTREGA":
-                        valor_base = (qtd * v_unit) + v_exc
-                        total_cep += valor_base
-                        if cep:
-                            mapa_cep_entrega[cep] = mapa_cep_entrega.get(cep, 0) + int(qtd)
-                    
-                    elif tipo_lanc == "COLETA":
-                        valor_base = (qtd * v_unit) + v_exc
-                        total_cep += valor_base
-                        if cep:
-                            mapa_cep_coleta[cep] = mapa_cep_coleta.get(cep, 0) + int(qtd)
-                    
-                    elif tipo_lanc == "ROTA FECHADA":
-                        rota_fechada += valor_total
-                    
-                    elif tipo_lanc == "DESCONTO":
-                        if v_desc == 0 and valor_total < 0:
-                            descontos += abs(valor_total)
-                    else:
-                        if v_adic == 0 and valor_total > 0:
-                            adicionais += valor_total
-                
-                total_pagar = total_cep + adicionais + rota_fechada - descontos
-                cnpj = df_ent['CNPJ'].iloc[0] if 'CNPJ' in df_ent.columns else ""
-                
-                resumo_entregadores.append({
-                    'nome': entregador,
-                    'cnpj': str(cnpj).strip() if pd.notna(cnpj) else "",
-                    'total_cep': total_cep,
-                    'adicionais': adicionais,
-                    'descontos': descontos,
-                    'rota_fechada': rota_fechada,
-                    'total_pagar': total_pagar,
-                    'entregas': sum(mapa_cep_entrega.values()),
-                    'coletas': sum(mapa_cep_coleta.values())
-                })
-            
-            # ===== EXIBIR CARDS (2 POR LINHA) =====
-            st.subheader(f"📋 Resumo de Entregadores - {quinzena} ({mes})")
-            
-            for i in range(0, len(resumo_entregadores), 2):
-                cols = st.columns(2)
-                
-                for col_idx, resumo in enumerate(resumo_entregadores[i:i+2]):
-                    with cols[col_idx]:
-                        # Card
-                        st.markdown(f"""
-                        <div style="border: 2px solid #1565c0; border-radius: 8px; padding: 15px; background: #e3f2fd; margin-bottom: 10px;">
-                            <div style="font-weight: bold; color: #1565c0; font-size: 14px; margin-bottom: 5px;">{resumo['nome']}</div>
-                            <div style="font-size: 12px; color: #666; margin-bottom: 10px;">CNPJ: {resumo['cnpj'] if resumo['cnpj'] else 'N/A'}</div>
-                            <div style="background: white; padding: 10px; border-radius: 5px; margin-bottom: 10px;">
-                                <div style="display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 5px;">
-                                    <span>Entregas:</span>
-                                    <span style="font-weight: bold;">{int(resumo['entregas'])}</span>
-                                </div>
-                                <div style="display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 5px;">
-                                    <span>Coletas:</span>
-                                    <span style="font-weight: bold;">{int(resumo['coletas'])}</span>
-                                </div>
-                                <div style="display: flex; justify-content: space-between; font-size: 12px;">
-                                    <span>CEP:</span>
-                                    <span style="font-weight: bold;">R$ {resumo['total_cep']:.2f}</span>
-                                </div>
-                            </div>
-                            <div style="background: #fff59d; padding: 10px; border-radius: 5px; text-align: center; font-weight: bold; color: #333; font-size: 16px;">
-                                TOTAL R$ {resumo['total_pagar']:.2f}
-                            </div>
-                        </div>
-                        """, unsafe_allow_html=True)
-            
-            # ===== RELATÓRIO DETALHADO =====
+            # ===== RELATÓRIO DETALHADO (PRIMEIRO) =====
             st.subheader(f"📊 Relatório Detalhado - {quinzena} ({mes})")
             
             colunas_exibir = ['DATA', 'NOME_ENTREGADOR', 'CEP', 'TIPO_LANCAMENTO', 'QTD_ENTREGAS', 'VALOR_UNITARIO', 'VALOR_ADICIONAL', 'VALOR_DESCONTO', 'VALOR_TOTAL_LINHA']
@@ -195,7 +107,7 @@ try:
             
             st.dataframe(df_quinzena[colunas_disponiveis], use_container_width=True, hide_index=True)
             
-            # ===== OPÇÃO DE VER RECIBO INDIVIDUAL =====
+            # ===== OPÇÃO DE GERAR RECIBO INDIVIDUAL =====
             st.divider()
             st.subheader("📄 Gerar Recibo Individual")
             
@@ -414,6 +326,130 @@ try:
                     html_recibo = gerar_recibo_html()
                     components.html(html_recibo, height=900, scrolling=True)
                     st.info("💡 **Para imprimir como PDF:** Use Ctrl+P → Salvar como PDF")
+            
+            # ===== RESUMO POR ENTREGADOR (FINAL - COM BOTÃO) =====
+            st.divider()
+            st.subheader("📋 Gerar Resumo de Entregadores")
+            
+            if st.button("🔍 Gerar Resumo da Quinzena", use_container_width=True, key="gerar_resumo"):
+                st.session_state.show_resumo = True
+            
+            if st.session_state.get("show_resumo"):
+                resumo_entregadores = []
+                
+                for entregador in sorted(df_quinzena['NOME_ENTREGADOR'].unique()):
+                    df_ent = df_quinzena[df_quinzena['NOME_ENTREGADOR'] == entregador]
+                    
+                    mapa_cep_entrega = {}
+                    mapa_cep_coleta = {}
+                    total_cep = 0
+                    adicionais = 0
+                    descontos = 0
+                    rota_fechada = 0
+                    
+                    for idx, row in df_ent.iterrows():
+                        tipo_lanc = str(row.get('TIPO_LANCAMENTO', '')).upper().strip()
+                        cep = str(row.get('CEP', '')).strip()
+                        qtd = float(row.get('QTD_ENTREGAS', 0) or 0)
+                        v_unit = float(row.get('VALOR_UNITARIO', 0) or 0)
+                        v_exc = float(row.get('VALOR_EXCEDENTE', 0) or 0)
+                        v_adic = float(row.get('VALOR_ADICIONAL', 0) or 0)
+                        v_desc = float(row.get('VALOR_DESCONTO', 0) or 0)
+                        valor_total = float(row.get('VALOR_TOTAL_LINHA', 0) or 0)
+                        
+                        adicionais += v_adic
+                        descontos += v_desc
+                        
+                        if tipo_lanc == "ENTREGA":
+                            valor_base = (qtd * v_unit) + v_exc
+                            total_cep += valor_base
+                            if cep:
+                                mapa_cep_entrega[cep] = mapa_cep_entrega.get(cep, 0) + int(qtd)
+                        
+                        elif tipo_lanc == "COLETA":
+                            valor_base = (qtd * v_unit) + v_exc
+                            total_cep += valor_base
+                            if cep:
+                                mapa_cep_coleta[cep] = mapa_cep_coleta.get(cep, 0) + int(qtd)
+                        
+                        elif tipo_lanc == "ROTA FECHADA":
+                            rota_fechada += valor_total
+                        
+                        elif tipo_lanc == "DESCONTO":
+                            if v_desc == 0 and valor_total < 0:
+                                descontos += abs(valor_total)
+                        else:
+                            if v_adic == 0 and valor_total > 0:
+                                adicionais += valor_total
+                    
+                    total_pagar = total_cep + adicionais + rota_fechada - descontos
+                    cnpj = df_ent['CNPJ'].iloc[0] if 'CNPJ' in df_ent.columns else ""
+                    
+                    resumo_entregadores.append({
+                        'ENTREGADOR': entregador,
+                        'CNPJ': str(cnpj).strip() if pd.notna(cnpj) else "N/A",
+                        'ENTREGAS': int(sum(mapa_cep_entrega.values())),
+                        'COLETAS': int(sum(mapa_cep_coleta.values())),
+                        'TOTAL CEP': f"R$ {total_cep:.2f}",
+                        'ADICIONAIS': f"R$ {adicionais:.2f}",
+                        'DESCONTOS': f"R$ {descontos:.2f}",
+                        'ROTA FECHADA': f"R$ {rota_fechada:.2f}",
+                        'TOTAL A RECEBER': f"R$ {total_pagar:.2f}"
+                    })
+                
+                # EXIBIR CARDS
+                st.markdown(f"### Resumo de Entregadores - {quinzena} ({mes})")
+                
+                for i in range(0, len(resumo_entregadores), 2):
+                    cols = st.columns(2)
+                    
+                    for col_idx, resumo in enumerate(resumo_entregadores[i:i+2]):
+                        with cols[col_idx]:
+                            st.markdown(f"""
+                            <div style="border: 2px solid #1565c0; border-radius: 8px; padding: 15px; background: #e3f2fd; margin-bottom: 10px;">
+                                <div style="font-weight: bold; color: #1565c0; font-size: 14px; margin-bottom: 5px;">{resumo['ENTREGADOR']}</div>
+                                <div style="font-size: 11px; color: #666; margin-bottom: 10px;">CNPJ: {resumo['CNPJ']}</div>
+                                <div style="background: white; padding: 10px; border-radius: 5px; margin-bottom: 10px; font-size: 12px;">
+                                    <div style="display: flex; justify-content: space-between; margin-bottom: 5px;">
+                                        <span>Entregas:</span>
+                                        <span style="font-weight: bold;">{resumo['ENTREGAS']}</span>
+                                    </div>
+                                    <div style="display: flex; justify-content: space-between; margin-bottom: 5px;">
+                                        <span>Coletas:</span>
+                                        <span style="font-weight: bold;">{resumo['COLETAS']}</span>
+                                    </div>
+                                    <div style="display: flex; justify-content: space-between; margin-bottom: 5px;">
+                                        <span>Total CEP:</span>
+                                        <span style="font-weight: bold;">{resumo['TOTAL CEP']}</span>
+                                    </div>
+                                    <div style="display: flex; justify-content: space-between;">
+                                        <span>Adicionais:</span>
+                                        <span style="font-weight: bold;">{resumo['ADICIONAIS']}</span>
+                                    </div>
+                                </div>
+                                <div style="background: #fff59d; padding: 10px; border-radius: 5px; text-align: center; font-weight: bold; color: #333; font-size: 16px;">
+                                    {resumo['TOTAL A RECEBER']}
+                                </div>
+                            </div>
+                            """, unsafe_allow_html=True)
+                
+                # BOTÃO PARA BAIXAR EM EXCEL
+                df_resumo = pd.DataFrame(resumo_entregadores)
+                
+                # Converter para Excel
+                output = BytesIO()
+                with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                    df_resumo.to_excel(writer, sheet_name='Resumo', index=False)
+                
+                output.seek(0)
+                
+                st.download_button(
+                    label="⬇️ Baixar Resumo em Excel",
+                    data=output.getvalue(),
+                    file_name=f"Resumo_Entregadores_{quinzena}_{mes}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True
+                )
         else:
             st.warning("⚠️ Nenhum dado encontrado para os filtros selecionados.")
     else:
