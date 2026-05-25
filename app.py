@@ -21,18 +21,26 @@ try:
         ID_PLANILHA = "17LU-Z0xjxPaJ_3gnUd79NvzpF3P3hKTHBTIROZXbv2M"
         workbook = client.open_by_key(ID_PLANILHA)
         
-        # Lê CADASTRO (normal)
+        # Lê CADASTRO
         df_cadastro = pd.DataFrame(workbook.worksheet("CADASTRO").get_all_records())
         
-        # Lê LANCAMENTOS (VOLTANDO AO ANTERIOR QUE FUNCIONAVA)
+        # Lê LANCAMENTOS
         df_lancamentos = pd.DataFrame(workbook.worksheet("LANCAMENTOS").get_all_records())
         
-        # Converter DATA
-        df_lancamentos['DATA'] = pd.to_datetime(df_lancamentos['DATA'], errors='coerce')
-        df_lancamentos['MES_ANO'] = df_lancamentos['DATA'].dt.strftime('%m/%Y')
-        df_lancamentos['MES_REFERENCIA'] = df_lancamentos['MES_ANO']
+        # LIMPEZA E NORMALIZAÇÃO DE NOMES
+        # Remove espaços extras, fórmulas, caracteres inválidos
+        def limpar_nome(nome):
+            if pd.isna(nome):
+                return ""
+            nome = str(nome).strip()
+            # Remove "FORMULA FORMULA FORMULA" ou similares
+            if "FORMULA" in nome.upper():
+                return ""
+            return nome.strip()
         
-        # Encontra coluna de nome
+        # Limpa nomes em ambos os DataFrames
+        df_lancamentos['NOME_ENTREGADOR'] = df_lancamentos['NOME_ENTREGADOR'].apply(limpar_nome)
+        
         col_nome_cadastro = None
         for col in df_cadastro.columns:
             if 'NOME' in col.upper() or 'ENTREGADOR' in col.upper():
@@ -42,6 +50,16 @@ try:
             col_nome_cadastro = df_cadastro.columns[0]
         
         df_cadastro = df_cadastro.rename(columns={col_nome_cadastro: 'NOME_ENTREGADOR'})
+        df_cadastro['NOME_ENTREGADOR'] = df_cadastro['NOME_ENTREGADOR'].apply(limpar_nome)
+        
+        # Remove linhas vazias
+        df_lancamentos = df_lancamentos[df_lancamentos['NOME_ENTREGADOR'] != '']
+        df_cadastro = df_cadastro[df_cadastro['NOME_ENTREGADOR'] != '']
+        
+        # Converter DATA
+        df_lancamentos['DATA'] = pd.to_datetime(df_lancamentos['DATA'], errors='coerce')
+        df_lancamentos['MES_ANO'] = df_lancamentos['DATA'].dt.strftime('%m/%Y')
+        df_lancamentos['MES_REFERENCIA'] = df_lancamentos['MES_ANO']
         
         # Merge CNPJ
         df_lancamentos = df_lancamentos.merge(
@@ -50,14 +68,12 @@ try:
             how='left'
         )
         
-        # CONVERSÃO MELHORADA DE VALORES NUMÉRICOS
+        # CONVERSÃO DE VALORES NUMÉRICOS
         colunas_numericas = ['QTD_ENTREGAS', 'VALOR_UNITARIO', 'VALOR_EXCEDENTE', 'VALOR_ADICIONAL', 'VALOR_DESCONTO', 'VALOR_TOTAL_LINHA']
         
         for col in colunas_numericas:
             if col in df_lancamentos.columns:
-                # Remove R$, espaços, converte vírgula para ponto
                 df_lancamentos[col] = df_lancamentos[col].astype(str).str.replace('R$', '', regex=False).str.replace(',', '.', regex=False).str.strip()
-                # Converte para float
                 df_lancamentos[col] = pd.to_numeric(df_lancamentos[col], errors='coerce').fillna(0)
         
         # Filtros
@@ -71,7 +87,7 @@ try:
             quinzena = st.selectbox("Quinzena:", quinzenas)
             
             df_filtro = df_mes[df_mes['QUINZENA'] == quinzena]
-            entregadores = sorted(df_filtro['NOME_ENTREGADOR'].unique())
+            entregadores = sorted([e for e in df_filtro['NOME_ENTREGADOR'].unique() if e != ''])
             entregador = st.selectbox("Entregador:", entregadores)
         
         # Filtra dados
