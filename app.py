@@ -1,9 +1,8 @@
 import streamlit as st
 import pandas as pd
-from fpdf import FPDF
-from io import BytesIO
 import gspread
 from google.oauth2.service_account import Credentials
+from datetime import datetime
 
 st.set_page_config(page_title="Dashboard GDS Logística", layout="wide")
 st.title("📊 Dashboard de Pagamento - GDS Logística")
@@ -26,7 +25,7 @@ try:
         
         # Lê LANCAMENTOS
         df_lancamentos = pd.DataFrame(workbook.worksheet("LANCAMENTOS").get_all_records())
-        df_lancamentos['MES_REFERENCIA'] = df_lancamentos['MES_REFERENCIA'].str.split('/').str[0]
+        df_lancamentos['MES_REFERENCIA'] = df_lancamentos['MES_REFERENCIA'].str.split('/').str[0].str.strip()
         
         # Merge CNPJ
         df_lancamentos = df_lancamentos.merge(
@@ -35,10 +34,15 @@ try:
             how='left'
         )
         
+        # Converter valores para float
+        for col in ['VALOR_TOTAL_LINHA', 'VALOR_ADICIONAL', 'VALOR_DESCONTO']:
+            if col in df_lancamentos.columns:
+                df_lancamentos[col] = pd.to_numeric(df_lancamentos[col], errors='coerce').fillna(0)
+        
         # Filtros
         with st.sidebar:
             st.header("🔧 Filtros")
-            meses = sorted(df_lancamentos['MES_REFERENCIA'].unique())
+            meses = sorted(df_lancamentos['MES_REFERENCIA'].dropna().unique())
             mes = st.selectbox("Mês:", meses)
             
             quinzenas = sorted(df_lancamentos[df_lancamentos['MES_REFERENCIA'] == mes]['QUINZENA'].unique())
@@ -54,17 +58,17 @@ try:
             (df_lancamentos['MES_REFERENCIA'] == mes) &
             (df_lancamentos['QUINZENA'] == quinzena) &
             (df_lancamentos['NOME_ENTREGADOR'] == entregador)
-        ]
+        ].copy()
         
         if len(df_filtrado) > 0:
-            # Métricas
-            col1, col2, col3, col4 = st.columns(4)
-            
+            # Cálculos
             total = float(df_filtrado['VALOR_TOTAL_LINHA'].sum())
             entregas = len(df_filtrado[df_filtrado['TIPO_LANCAMENTO'] == 'ENTREGA'])
-            adicionais = float(df_filtrado['VALOR_ADICIONAL'].sum()) if 'VALOR_ADICIONAL' in df_filtrado.columns else 0
-            descontos = float(df_filtrado['VALOR_DESCONTO'].sum()) if 'VALOR_DESCONTO' in df_filtrado.columns else 0
+            adicionais = float(df_filtrado['VALOR_ADICIONAL'].sum())
+            descontos = float(df_filtrado['VALOR_DESCONTO'].sum())
             
+            # Métricas
+            col1, col2, col3, col4 = st.columns(4)
             with col1:
                 st.metric("💰 Total", f"R$ {total:.2f}")
             with col2:
@@ -85,103 +89,166 @@ try:
             resumo_cep = df_filtrado[df_filtrado['TIPO_LANCAMENTO'] == 'ENTREGA'].groupby('CEP').size().reset_index(name='QTD_ENTREGAS')
             st.dataframe(resumo_cep, use_container_width=True, hide_index=True)
             
-            # Função para gerar PDF
-            def gerar_recibo_pdf(df, entregador_nome, cnpj, mes_ref, quinzena_ref):
-                pdf = FPDF()
-                pdf.add_page()
-                pdf.set_font("Arial", "B", 16)
-                
-                # Título
-                pdf.cell(0, 10, "RECIBO DE PAGAMENTO", ln=True, align="C")
-                pdf.ln(5)
-                
-                # Informações
-                pdf.set_font("Arial", "B", 10)
-                pdf.cell(40, 8, "ENTREGADOR:", 0)
-                pdf.set_font("Arial", "", 10)
-                pdf.cell(0, 8, entregador_nome, ln=True)
-                
-                pdf.set_font("Arial", "B", 10)
-                pdf.cell(40, 8, "CNPJ:", 0)
-                pdf.set_font("Arial", "", 10)
-                pdf.cell(0, 8, str(cnpj) if pd.notna(cnpj) else "N/A", ln=True)
-                
-                pdf.set_font("Arial", "B", 10)
-                pdf.cell(40, 8, "PERÍODO:", 0)
-                pdf.set_font("Arial", "", 10)
-                pdf.cell(0, 8, f"{mes_ref} - {quinzena_ref}", ln=True)
-                
-                pdf.ln(3)
-                
-                # Resumo por CEP
-                pdf.set_font("Arial", "B", 10)
-                pdf.cell(0, 8, "RESUMO OPERACIONAL", ln=True)
+            # Função para gerar HTML do recibo
+            def gerar_recibo_html(df, entregador_nome, cnpj, mes_ref, quinzena_ref):
+                total_valor = float(df['VALOR_TOTAL_LINHA'].sum())
+                total_adicionais = float(df['VALOR_ADICIONAL'].sum())
+                total_descontos = float(df['VALOR_DESCONTO'].sum())
                 
                 resumo = df[df['TIPO_LANCAMENTO'] == 'ENTREGA'].groupby('CEP').size().reset_index(name='QTD')
-                pdf.set_font("Arial", "B", 9)
-                pdf.cell(80, 7, "CEP", 1)
-                pdf.cell(40, 7, "QTD ENTREGAS", 1, ln=True)
                 
-                pdf.set_font("Arial", "", 9)
+                linhas_resumo = ""
                 for _, row in resumo.iterrows():
-                    pdf.cell(80, 7, str(row['CEP']), 1)
-                    pdf.cell(40, 7, str(int(row['QTD'])), 1, ln=True)
+                    linhas_resumo += f"<tr><td style='border: 1px solid #000; padding: 10px;'>{row['CEP']}</td><td style='border: 1px solid #000; padding: 10px; text-align: center;'>{int(row['QTD'])}</td></tr>"
                 
-                pdf.ln(3)
+                cnpj_str = str(cnpj) if pd.notna(cnpj) else "N/A"
                 
-                # Resumo Financeiro
-                pdf.set_font("Arial", "B", 10)
-                pdf.cell(0, 8, "RESUMO FINANCEIRO", ln=True)
-                
-                total_valor = df['VALOR_TOTAL_LINHA'].sum()
-                total_adicionais = df['VALOR_ADICIONAL'].sum() if 'VALOR_ADICIONAL' in df.columns else 0
-                total_descontos = df['VALOR_DESCONTO'].sum() if 'VALOR_DESCONTO' in df.columns else 0
-                
-                pdf.set_font("Arial", "", 10)
-                pdf.cell(120, 8, "TOTAL POR CEP:", 0)
-                pdf.cell(0, 8, f"R$ {total_valor:.2f}", ln=True, align="R")
-                
-                pdf.cell(120, 8, "ADICIONAIS:", 0)
-                pdf.cell(0, 8, f"R$ {total_adicionais:.2f}", ln=True, align="R")
-                
-                pdf.cell(120, 8, "DESCONTOS:", 0)
-                pdf.cell(0, 8, f"R$ {total_descontos:.2f}", ln=True, align="R")
-                
-                pdf.set_font("Arial", "B", 10)
-                pdf.cell(120, 8, "TOTAL A RECEBER:", 0)
-                pdf.cell(0, 8, f"R$ {total_valor:.2f}", ln=True, align="R")
-                
-                pdf.ln(5)
-                
-                # Assinatura
-                pdf.set_font("Arial", "", 9)
-                pdf.cell(90, 8, "ASSINATURA", 0, align="C")
-                pdf.cell(0, 8, "DATA", ln=True, align="C")
-                
-                pdf.cell(90, 20, "_________________", 0, align="C")
-                pdf.cell(0, 20, "_________________", ln=True, align="C")
-                
-                pdf_bytes = pdf.output()
-                return BytesIO(pdf_bytes)
+                html = f"""
+                <!DOCTYPE html>
+                <html>
+                <head>
+                    <meta charset="UTF-8">
+                    <title>Recibo de Pagamento</title>
+                    <style>
+                        * {{ margin: 0; padding: 0; }}
+                        body {{ font-family: 'Arial', sans-serif; background: white; }}
+                        @media print {{ body {{ margin: 0; padding: 0; }} }}
+                        .container {{ max-width: 900px; margin: 20px auto; padding: 30px; border: 2px solid #000; }}
+                        .header {{ text-align: center; margin-bottom: 20px; }}
+                        h1 {{ font-size: 24px; font-weight: bold; margin-bottom: 30px; }}
+                        .info-table {{ width: 100%; margin-bottom: 30px; }}
+                        .info-table tr {{ height: 25px; }}
+                        .info-table td {{ padding: 8px; }}
+                        .label {{ font-weight: bold; width: 150px; }}
+                        .section-title {{ font-weight: bold; font-size: 14px; margin-top: 20px; margin-bottom: 10px; border-bottom: 2px solid #000; padding-bottom: 5px; }}
+                        .resumo-table {{ width: 100%; border-collapse: collapse; margin-bottom: 20px; }}
+                        .resumo-table th {{ background-color: #f0f0f0; border: 1px solid #000; padding: 10px; text-align: left; font-weight: bold; }}
+                        .resumo-table td {{ border: 1px solid #000; padding: 10px; }}
+                        .resumo-table td:last-child {{ text-align: center; }}
+                        .financeiro-table {{ width: 100%; margin-bottom: 30px; }}
+                        .financeiro-table tr {{ height: 28px; }}
+                        .financeiro-table td {{ padding: 8px; }}
+                        .financeiro-table .valor {{ text-align: right; padding-right: 20px; font-weight: bold; }}
+                        .total-row {{ border-top: 2px solid #000; border-bottom: 2px solid #000; background-color: #f9f9f9; }}
+                        .assinatura {{ margin-top: 50px; display: flex; justify-content: space-around; }}
+                        .assinatura-box {{ text-align: center; width: 200px; }}
+                        .assinatura-linha {{ border-bottom: 1px solid #000; height: 40px; margin-bottom: 5px; }}
+                        .assinatura-label {{ font-size: 12px; font-weight: bold; }}
+                        .footer {{ text-align: center; margin-top: 30px; font-size: 11px; color: #666; }}
+                    </style>
+                </head>
+                <body>
+                    <div class='container'>
+                        <div class='header'>
+                            <h1>RECIBO DE PAGAMENTO</h1>
+                        </div>
+                        
+                        <table class='info-table'>
+                            <tr>
+                                <td class='label'>ENTREGADOR:</td>
+                                <td>{entregador_nome}</td>
+                            </tr>
+                            <tr>
+                                <td class='label'>CNPJ:</td>
+                                <td>{cnpj_str}</td>
+                            </tr>
+                            <tr>
+                                <td class='label'>PERÍODO:</td>
+                                <td>{mes_ref} - {quinzena_ref}</td>
+                            </tr>
+                        </table>
+                        
+                        <div class='section-title'>RESUMO OPERACIONAL</div>
+                        <table class='resumo-table'>
+                            <thead>
+                                <tr>
+                                    <th>CEP</th>
+                                    <th>QTD ENTREGAS</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {linhas_resumo}
+                            </tbody>
+                        </table>
+                        
+                        <div class='section-title'>RESUMO FINANCEIRO</div>
+                        <table class='financeiro-table'>
+                            <tr>
+                                <td class='label'>TOTAL POR CEP</td>
+                                <td class='valor'>R$ {total_valor:.2f}</td>
+                            </tr>
+                            <tr>
+                                <td class='label'>ADICIONAIS</td>
+                                <td class='valor'>R$ {total_adicionais:.2f}</td>
+                            </tr>
+                            <tr>
+                                <td class='label'>DESCONTOS</td>
+                                <td class='valor'>R$ {total_descontos:.2f}</td>
+                            </tr>
+                            <tr class='total-row'>
+                                <td class='label'>TOTAL A RECEBER</td>
+                                <td class='valor'>R$ {total_valor:.2f}</td>
+                            </tr>
+                        </table>
+                        
+                        <div class='assinatura'>
+                            <div class='assinatura-box'>
+                                <div class='assinatura-linha'></div>
+                                <div class='assinatura-label'>ASSINATURA DO ENTREGADOR</div>
+                            </div>
+                            <div class='assinatura-box'>
+                                <div class='assinatura-linha'></div>
+                                <div class='assinatura-label'>DATA</div>
+                            </div>
+                        </div>
+                        
+                        <div class='footer'>
+                            <p>Gerado em {datetime.now().strftime('%d/%m/%Y às %H:%M')} | GDS Logística</p>
+                        </div>
+                    </div>
+                </body>
+                </html>
+                """
+                return html
             
-            # Botão para gerar PDF
-            col_btn1, col_btn2 = st.columns(2)
+            # Botões
+            col_btn1, col_btn2, col_btn3 = st.columns(3)
+            
             with col_btn1:
-                if st.button("📄 Gerar Recibo PDF", use_container_width=True):
+                if st.button("📄 Gerar Recibo", use_container_width=True, key="gerar_recibo"):
                     cnpj = df_filtrado['CNPJ'].iloc[0] if 'CNPJ' in df_filtrado.columns else "N/A"
-                    pdf_buffer = gerar_recibo_pdf(df_filtrado, entregador, cnpj, mes, quinzena)
-                    
+                    html_recibo = gerar_recibo_html(df_filtrado, entregador, cnpj, mes, quinzena)
+                    st.session_state.html_recibo = html_recibo
+                    st.session_state.show_recibo = True
+            
+            with col_btn2:
+                if st.button("⬇️ Baixar HTML", use_container_width=True, key="baixar_html"):
+                    cnpj = df_filtrado['CNPJ'].iloc[0] if 'CNPJ' in df_filtrado.columns else "N/A"
+                    html_recibo = gerar_recibo_html(df_filtrado, entregador, cnpj, mes, quinzena)
                     st.download_button(
-                        label="⬇️ Baixar Recibo em PDF",
-                        data=pdf_buffer,
-                        file_name=f"Recibo_{entregador.replace(' ', '_')}_{mes}_{quinzena}.pdf",
-                        mime="application/pdf",
-                        use_container_width=True
+                        label="Clique aqui para confirmar o download",
+                        data=html_recibo,
+                        file_name=f"Recibo_{entregador.replace(' ', '_')}_{mes}_{quinzena}.html",
+                        mime="text/html",
+                        key="download_btn"
                     )
+            
+            with col_btn3:
+                if st.button("🖨️ Imprimir", use_container_width=True, key="imprimir"):
+                    st.session_state.show_recibo = True
+            
+            # Mostra recibo se solicitado
+            if st.session_state.get("show_recibo"):
+                st.divider()
+                cnpj = df_filtrado['CNPJ'].iloc[0] if 'CNPJ' in df_filtrado.columns else "N/A"
+                html_recibo = gerar_recibo_html(df_filtrado, entregador, cnpj, mes, quinzena)
+                st.markdown(html_recibo, unsafe_allow_html=True)
+                st.info("💡 **Para imprimir como PDF:** Use Ctrl+P (ou Cmd+P no Mac) → Salvar como PDF")
         else:
             st.warning("⚠️ Nenhum dado encontrado para os filtros selecionados.")
     else:
         raise Exception("Credenciais não encontradas")
         
 except Exception as e:
-    st.error(f"❌ Erro: {str(e)}")
+    st.error(f"❌ Erro ao conectar: {str(e)}")
+    st.info("Verifique se:\n- Credenciais estão nos Secrets\n- Service account tem permissão 'Editor'\n- Google Sheet está compartilhado com a service account")
