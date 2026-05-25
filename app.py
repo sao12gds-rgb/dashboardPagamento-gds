@@ -26,7 +26,13 @@ try:
         
         # Lê LANCAMENTOS
         df_lancamentos = pd.DataFrame(workbook.worksheet("LANCAMENTOS").get_all_records())
-        df_lancamentos['MES_REFERENCIA'] = df_lancamentos['MES_REFERENCIA'].str.split('/').str[0].str.strip()
+        
+        # Converte coluna de data
+        df_lancamentos['DATA'] = pd.to_datetime(df_lancamentos['DATA'], errors='coerce')
+        
+        # Extrai mês/ano da data
+        df_lancamentos['MES_ANO'] = df_lancamentos['DATA'].dt.strftime('%m/%Y')
+        df_lancamentos['MES_REFERENCIA'] = df_lancamentos['MES_ANO']
         
         # Encontra a coluna de nome no CADASTRO
         col_nome_cadastro = None
@@ -46,13 +52,10 @@ try:
             how='left'
         )
         
-        # Converter valores para float (remove espaços e converte)
-        for col in ['VALOR_TOTAL_LINHA', 'VALOR_ADICIONAL', 'VALOR_DESCONTO']:
+        # Conversão de valores numéricos (EXATAMENTE como Apps Script)
+        for col in ['QTD_ENTREGAS', 'VALOR_UNITARIO', 'VALOR_EXCEDENTE', 'VALOR_ADICIONAL', 'VALOR_DESCONTO', 'VALOR_TOTAL_LINHA']:
             if col in df_lancamentos.columns:
-                df_lancamentos[col] = pd.to_numeric(
-                    df_lancamentos[col].astype(str).str.replace(',', '.'), 
-                    errors='coerce'
-                ).fillna(0)
+                df_lancamentos[col] = pd.to_numeric(df_lancamentos[col], errors='coerce').fillna(0)
         
         # Filtros
         with st.sidebar:
@@ -60,63 +63,142 @@ try:
             meses = sorted(df_lancamentos['MES_REFERENCIA'].dropna().unique())
             mes = st.selectbox("Mês:", meses)
             
-            quinzenas = sorted(df_lancamentos[df_lancamentos['MES_REFERENCIA'] == mes]['QUINZENA'].unique())
+            df_mes = df_lancamentos[df_lancamentos['MES_REFERENCIA'] == mes]
+            quinzenas = sorted(df_mes['QUINZENA'].unique())
             quinzena = st.selectbox("Quinzena:", quinzenas)
             
-            entregadores = sorted(df_lancamentos[
-                (df_lancamentos['MES_REFERENCIA'] == mes) &
-                (df_lancamentos['QUINZENA'] == quinzena)
-            ]['NOME_ENTREGADOR'].unique())
+            df_filtro = df_mes[df_mes['QUINZENA'] == quinzena]
+            entregadores = sorted(df_filtro['NOME_ENTREGADOR'].unique())
             entregador = st.selectbox("Entregador:", entregadores)
         
-        df_filtrado = df_lancamentos[
+        # Filtra dados do entregador selecionado
+        df_entregador = df_lancamentos[
             (df_lancamentos['MES_REFERENCIA'] == mes) &
             (df_lancamentos['QUINZENA'] == quinzena) &
             (df_lancamentos['NOME_ENTREGADOR'] == entregador)
         ].copy()
         
-        if len(df_filtrado) > 0:
-            # Cálculos
-            total = float(df_filtrado['VALOR_TOTAL_LINHA'].sum())
-            entregas = len(df_filtrado[df_filtrado['TIPO_LANCAMENTO'] == 'ENTREGA'])
-            adicionais = float(df_filtrado['VALOR_ADICIONAL'].sum())
-            descontos = float(df_filtrado['VALOR_DESCONTO'].sum())
+        if len(df_entregador) > 0:
+            # ===== CÁLCULOS BASEADOS NO APPS SCRIPT =====
             
-            # Métricas
+            # Processar cada tipo de lançamento
+            mapa_cep_entrega = {}
+            mapa_cep_coleta = {}
+            mapa_cep_valor = {}
+            total_cep = 0
+            adicionais = 0
+            descontos = 0
+            rota_fechada = 0
+            rotas_fechadas_lista = []
+            
+            for idx, row in df_entregador.iterrows():
+                tipo_lanc = str(row['TIPO_LANCAMENTO']).upper().strip()
+                cep = str(row['CEP']).strip()
+                qtd = float(row['QTD_ENTREGAS'])
+                v_unit = float(row['VALOR_UNITARIO'])
+                v_exc = float(row['VALOR_EXCEDENTE'])
+                v_adic = float(row['VALOR_ADICIONAL'])
+                v_desc = float(row['VALOR_DESCONTO'])
+                valor_total = float(row['VALOR_TOTAL_LINHA'])
+                
+                adicionais += v_adic
+                descontos += v_desc
+                
+                if tipo_lanc == "ENTREGA":
+                    valor_base = (qtd * v_unit) + v_exc
+                    total_cep += valor_base
+                    if cep:
+                        mapa_cep_entrega[cep] = mapa_cep_entrega.get(cep, 0) + int(qtd)
+                        mapa_cep_valor[cep] = mapa_cep_valor.get(cep, 0) + valor_base
+                
+                elif tipo_lanc == "COLETA":
+                    valor_base = (qtd * v_unit) + v_exc
+                    total_cep += valor_base
+                    if cep:
+                        mapa_cep_coleta[cep] = mapa_cep_coleta.get(cep, 0) + int(qtd)
+                        mapa_cep_valor[cep] = mapa_cep_valor.get(cep, 0) + valor_base
+                
+                elif tipo_lanc == "ROTA FECHADA":
+                    valor_base = valor_total
+                    rota_fechada += valor_base
+                    rotas_fechadas_lista.append({
+                        'cep': cep if cep else '',
+                        'valor': valor_base
+                    })
+                
+                elif tipo_lanc == "DESCONTO":
+                    if v_desc == 0 and valor_total < 0:
+                        descontos += abs(valor_total)
+                
+                else:  # Adicionais
+                    if v_adic == 0 and valor_total > 0:
+                        adicionais += valor_total
+            
+            # Total a receber
+            total_pagar = total_cep + adicionais + rota_fechada - descontos
+            
+            # CNPJ
+            cnpj = df_entregador['CNPJ'].iloc[0] if 'CNPJ' in df_entregador.columns else ""
+            cnpj_str = str(cnpj).strip() if pd.notna(cnpj) else "N/A"
+            
+            # Período
+            periodo_inicio = df_entregador['DATA'].min().strftime('%d/%m')
+            periodo_fim = df_entregador['DATA'].max().strftime('%d/%m')
+            
+            # ===== EXIBIR MÉTRICAS =====
             col1, col2, col3, col4 = st.columns(4)
             with col1:
-                st.metric("💰 Total", f"R$ {total:.2f}")
+                st.metric("💰 Total CEP", f"R$ {total_cep:.2f}")
             with col2:
-                st.metric("📦 Entregas", entregas)
+                st.metric("📦 Entregas", sum(mapa_cep_entrega.values()))
             with col3:
                 st.metric("➕ Adicionais", f"R$ {adicionais:.2f}")
             with col4:
-                st.metric("➖ Descontos", f"R$ {descontos:.2f}")
+                st.metric("➖ Total a Pagar", f"R$ {total_pagar:.2f}")
             
             # Tabela de lançamentos
             st.subheader(f"Lançamentos de {entregador}")
-            colunas_exibir = ['DATA', 'CEP', 'TIPO_LANCAMENTO', 'VALOR_ADICIONAL', 'VALOR_DESCONTO', 'VALOR_TOTAL_LINHA']
-            colunas_disponiveis = [col for col in colunas_exibir if col in df_filtrado.columns]
-            st.dataframe(df_filtrado[colunas_disponiveis], use_container_width=True, hide_index=True)
+            colunas_exibir = ['DATA', 'CEP', 'TIPO_LANCAMENTO', 'QTD_ENTREGAS', 'VALOR_UNITARIO', 'VALOR_ADICIONAL', 'VALOR_DESCONTO', 'VALOR_TOTAL_LINHA']
+            colunas_disponiveis = [col for col in colunas_exibir if col in df_entregador.columns]
+            st.dataframe(df_entregador[colunas_disponiveis], use_container_width=True, hide_index=True)
             
-            # Resumo por CEP
-            st.subheader("📍 Resumo por CEP")
-            resumo_cep = df_filtrado[df_filtrado['TIPO_LANCAMENTO'] == 'ENTREGA'].groupby('CEP').size().reset_index(name='QTD_ENTREGAS')
-            st.dataframe(resumo_cep, use_container_width=True, hide_index=True)
-            
-            # Função para gerar HTML do recibo
-            def gerar_recibo_html(df, entregador_nome, cnpj, mes_ref, quinzena_ref):
-                total_valor = float(df['VALOR_TOTAL_LINHA'].sum())
-                total_adicionais = float(df['VALOR_ADICIONAL'].sum())
-                total_descontos = float(df['VALOR_DESCONTO'].sum())
+            # ===== FUNÇÃO PARA GERAR RECIBO (IGUAL AO APPS SCRIPT) =====
+            def gerar_recibo_html():
+                # Badges CEP
+                badges_cep_html = ""
+                todos_ceps = sorted(set(list(mapa_cep_entrega.keys()) + list(mapa_cep_coleta.keys())))
                 
-                resumo = df[df['TIPO_LANCAMENTO'] == 'ENTREGA'].groupby('CEP').size().reset_index(name='QTD')
+                for cep in todos_ceps:
+                    qtd_ent = mapa_cep_entrega.get(cep, 0)
+                    qtd_col = mapa_cep_coleta.get(cep, 0)
+                    valor_cep = mapa_cep_valor.get(cep, 0)
+                    
+                    partes = []
+                    if qtd_ent > 0:
+                        partes.append(f"{int(qtd_ent)} entregas")
+                    if qtd_col > 0:
+                        partes.append(f"{int(qtd_col)} coletas")
+                    
+                    partes_texto = " + ".join(partes)
+                    badges_cep_html += f'<span class="badge">CEP {cep} — {partes_texto} — R$ {valor_cep:.2f}</span>'
                 
-                linhas_resumo = ""
-                for _, row in resumo.iterrows():
-                    linhas_resumo += f"<tr><td style='border: 1px solid #000; padding: 10px;'>{row['CEP']}</td><td style='border: 1px solid #000; padding: 10px; text-align: center;'>{int(row['QTD'])}</td></tr>"
+                # Badges ROTA FECHADA
+                badges_rota_html = ""
+                for rota in rotas_fechadas_lista:
+                    lbl = f"ROTA FECHADA CEP {rota['cep']}" if rota['cep'] else "ROTA FECHADA"
+                    badges_rota_html += f'<span class="badge-blue">{lbl} — R$ {rota["valor"]:.2f}</span>'
                 
-                cnpj_str = str(cnpj) if pd.notna(cnpj) else "N/A"
+                # Badge ADICIONAL
+                badge_adicional = f'<span class="badge-green">Adicional R$ {adicionais:.2f}</span>' if adicionais > 0 else ""
+                
+                # Badge DESCONTO
+                badge_desconto = f'<span class="badge-red">Desconto R$ {descontos:.2f}</span>' if descontos > 0 else ""
+                
+                # Linha ROTA FECHADA
+                linha_rota = f'<div class="row"><span>ROTA FECHADA</span><span>R$ {rota_fechada:.2f}</span></div>' if rota_fechada > 0 else ""
+                
+                # Linha DESCONTO
+                linha_desconto = f'<div class="row red"><span>DESCONTOS</span><span>— R$ {descontos:.2f}</span></div>' if descontos > 0 else '<div class="row"><span>DESCONTOS</span><span>R$ 0.00</span></div>'
                 
                 html = f"""
                 <!DOCTYPE html>
@@ -125,83 +207,87 @@ try:
                     <meta charset="UTF-8">
                     <title>Recibo de Pagamento</title>
                     <style>
-                        body {{ font-family: Arial, sans-serif; margin: 20px; }}
-                        .container {{ max-width: 900px; margin: 0 auto; padding: 30px; border: 2px solid #000; }}
-                        .header {{ text-align: center; margin-bottom: 30px; }}
-                        h1 {{ font-size: 24px; font-weight: bold; margin: 0; }}
-                        table {{ width: 100%; border-collapse: collapse; margin-bottom: 20px; }}
-                        td {{ padding: 10px; }}
-                        th {{ padding: 10px; text-align: left; font-weight: bold; }}
-                        .label {{ font-weight: bold; width: 150px; }}
-                        .border-table {{ border: 1px solid #000; }}
-                        .section-title {{ font-weight: bold; font-size: 14px; margin-top: 20px; margin-bottom: 10px; border-bottom: 2px solid #000; padding-bottom: 5px; }}
-                        .valor {{ text-align: right; }}
-                        .total-row {{ border-top: 2px solid #000; border-bottom: 2px solid #000; background-color: #f9f9f9; font-weight: bold; }}
+                        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+                        body {{ font-family: Arial, sans-serif; font-size: 12px; background: #f5f5f5; }}
+                        .page {{ width: 210mm; padding: 10mm; margin: 10px auto; background: white; box-shadow: 0 0 10px rgba(0,0,0,0.1); }}
+                        .recibo {{ border: 2px solid #333; padding: 15px; }}
+                        .header {{ display: flex; justify-content: space-between; border-bottom: 2px solid #333; padding: 10px 0; margin-bottom: 15px; }}
+                        .header span {{ font-weight: bold; font-size: 13px; }}
+                        .row {{ display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid #ddd; }}
+                        .row.red {{ color: #cc0000; }}
+                        .row.total {{ border-top: 2px solid #333; border-bottom: 0; margin-top: 8px; padding-top: 8px; font-weight: bold; font-size: 14px; }}
+                        .label {{ font-weight: bold; color: #666; font-size: 10px; text-transform: uppercase; margin-bottom: 3px; }}
+                        .value {{ font-weight: bold; font-size: 12px; }}
+                        .badges {{ display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; margin-bottom: 10px; }}
+                        .badge, .badge-red, .badge-green, .badge-blue {{ border-radius: 20px; padding: 4px 10px; font-size: 10px; font-weight: bold; border: 1px solid; }}
+                        .badge {{ border-color: #999; color: #333; }}
+                        .badge-red {{ border-color: #cc0000; color: #cc0000; }}
+                        .badge-green {{ border-color: #008000; color: #008000; }}
+                        .badge-blue {{ border-color: #0044cc; color: #0044cc; }}
+                        .info-block {{ display: flex; gap: 30px; padding: 10px 0; border-bottom: 1px solid #ddd; margin-bottom: 10px; }}
+                        .info-item {{ flex: 1; }}
+                        .assinatura {{ display: flex; gap: 40px; margin-top: 30px; }}
+                        .ass-item {{ flex: 1; }}
+                        .ass-line {{ border-bottom: 1px solid #333; height: 50px; margin-bottom: 5px; }}
+                        .ass-label {{ font-size: 10px; font-weight: bold; text-align: center; }}
                     </style>
                 </head>
                 <body>
-                    <div class='container'>
-                        <div class='header'>
-                            <h1>RECIBO DE PAGAMENTO</h1>
-                        </div>
-                        
-                        <table>
-                            <tr>
-                                <td class='label'>ENTREGADOR:</td>
-                                <td>{entregador_nome}</td>
-                            </tr>
-                            <tr>
-                                <td class='label'>CNPJ:</td>
-                                <td>{cnpj_str}</td>
-                            </tr>
-                            <tr>
-                                <td class='label'>PERÍODO:</td>
-                                <td>{mes_ref} - {quinzena_ref}</td>
-                            </tr>
-                        </table>
-                        
-                        <div class='section-title'>RESUMO OPERACIONAL</div>
-                        <table class='border-table'>
-                            <tr>
-                                <th>CEP</th>
-                                <th>QTD ENTREGAS</th>
-                            </tr>
-                            {linhas_resumo}
-                        </table>
-                        
-                        <div class='section-title'>RESUMO FINANCEIRO</div>
-                        <table>
-                            <tr>
-                                <td class='label'>TOTAL POR CEP</td>
-                                <td class='valor'>R$ {total_valor:.2f}</td>
-                            </tr>
-                            <tr>
-                                <td class='label'>ADICIONAIS</td>
-                                <td class='valor'>R$ {total_adicionais:.2f}</td>
-                            </tr>
-                            <tr>
-                                <td class='label'>DESCONTOS</td>
-                                <td class='valor'>R$ {total_descontos:.2f}</td>
-                            </tr>
-                            <tr class='total-row'>
-                                <td class='label'>TOTAL A RECEBER</td>
-                                <td class='valor'>R$ {total_valor:.2f}</td>
-                            </tr>
-                        </table>
-                        
-                        <div style='margin-top: 50px; display: flex; justify-content: space-around;'>
-                            <div style='text-align: center; width: 200px;'>
-                                <div style='border-bottom: 1px solid #000; height: 50px; margin-bottom: 10px;'></div>
-                                <div style='font-size: 12px; font-weight: bold;'>ASSINATURA DO ENTREGADOR</div>
+                    <div class="page">
+                        <div class="recibo">
+                            <div class="header">
+                                <span>RECIBO DE PAGAMENTO</span>
+                                <span>1ª QUINZENA — {mes}</span>
                             </div>
-                            <div style='text-align: center; width: 200px;'>
-                                <div style='border-bottom: 1px solid #000; height: 50px; margin-bottom: 10px;'></div>
-                                <div style='font-size: 12px; font-weight: bold;'>DATA</div>
+                            
+                            <div class="info-block">
+                                <div class="info-item">
+                                    <div class="label">ENTREGADOR</div>
+                                    <div class="value">{entregador}</div>
+                                </div>
+                                <div class="info-item">
+                                    <div class="label">CNPJ</div>
+                                    <div class="value">{cnpj_str}</div>
+                                </div>
+                                <div class="info-item">
+                                    <div class="label">PERÍODO</div>
+                                    <div class="value">{periodo_inicio} a {periodo_fim}</div>
+                                </div>
                             </div>
-                        </div>
-                        
-                        <div style='text-align: center; margin-top: 30px; font-size: 11px; color: #666;'>
-                            <p>Gerado em {datetime.now().strftime('%d/%m/%Y às %H:%M')} | GDS Logística</p>
+                            
+                            <div style="margin: 15px 0;">
+                                <div style="font-weight: bold; margin-bottom: 8px;">VALORES</div>
+                                <div class="row"><span>TOTAL POR CEP</span><span>R$ {total_cep:.2f}</span></div>
+                                {linha_rota}
+                                <div class="row"><span>ADICIONAIS</span><span>R$ {adicionais:.2f}</span></div>
+                                {linha_desconto}
+                                <div class="row total"><span>TOTAL A RECEBER</span><span>R$ {total_pagar:.2f}</span></div>
+                            </div>
+                            
+                            <div style="margin-top: 15px;">
+                                <div class="label">RESUMO OPERACIONAL</div>
+                                <div class="badges">
+                                    {badges_cep_html}
+                                    {badges_rota_html}
+                                    {badge_adicional}
+                                    {badge_desconto}
+                                </div>
+                            </div>
+                            
+                            <div class="assinatura">
+                                <div class="ass-item">
+                                    <div class="ass-line"></div>
+                                    <div class="ass-label">ASSINATURA DO ENTREGADOR</div>
+                                </div>
+                                <div class="ass-item">
+                                    <div class="ass-line"></div>
+                                    <div class="ass-label">DATA</div>
+                                </div>
+                            </div>
+                            
+                            <div style="text-align: center; margin-top: 20px; font-size: 10px; color: #888;">
+                                Gerado em {datetime.now().strftime('%d/%m/%Y às %H:%M')}
+                            </div>
                         </div>
                     </div>
                 </body>
@@ -210,7 +296,7 @@ try:
                 return html
             
             # Botões
-            col_btn1, col_btn2, col_btn3 = st.columns(3)
+            col_btn1, col_btn2 = st.columns(2)
             
             with col_btn1:
                 if st.button("📄 Gerar Recibo", use_container_width=True, key="gerar_recibo"):
@@ -218,26 +304,20 @@ try:
             
             with col_btn2:
                 if st.button("⬇️ Baixar HTML", use_container_width=True, key="baixar_html"):
-                    cnpj = df_filtrado['CNPJ'].iloc[0] if 'CNPJ' in df_filtrado.columns else "N/A"
-                    html_recibo = gerar_recibo_html(df_filtrado, entregador, cnpj, mes, quinzena)
+                    html_recibo = gerar_recibo_html()
                     st.download_button(
                         label="Clique aqui para confirmar download",
                         data=html_recibo,
-                        file_name=f"Recibo_{entregador.replace(' ', '_')}_{mes}_{quinzena}.html",
+                        file_name=f"Recibo_{entregador.replace(' ', '_')}.html",
                         mime="text/html",
                         key="download_btn"
                     )
             
-            with col_btn3:
-                if st.button("🖨️ Imprimir", use_container_width=True, key="imprimir"):
-                    st.session_state.show_recibo = True
-            
             # Mostra recibo
             if st.session_state.get("show_recibo"):
                 st.divider()
-                cnpj = df_filtrado['CNPJ'].iloc[0] if 'CNPJ' in df_filtrado.columns else "N/A"
-                html_recibo = gerar_recibo_html(df_filtrado, entregador, cnpj, mes, quinzena)
-                components.html(html_recibo, height=1200, scrolling=True)
+                html_recibo = gerar_recibo_html()
+                components.html(html_recibo, height=900, scrolling=True)
                 st.info("💡 **Para imprimir como PDF:** Use Ctrl+P → Salvar como PDF")
         else:
             st.warning("⚠️ Nenhum dado encontrado para os filtros selecionados.")
@@ -246,3 +326,4 @@ try:
         
 except Exception as e:
     st.error(f"❌ Erro: {str(e)}")
+    st.info("Verifique se:\n- Credenciais estão nos Secrets\n- Service account tem permissão 'Editor'\n- Google Sheet está compartilhado com a service account")
