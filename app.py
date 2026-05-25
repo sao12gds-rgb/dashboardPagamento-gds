@@ -1,4 +1,5 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd
 import gspread
 from google.oauth2.service_account import Credentials
@@ -27,7 +28,7 @@ try:
         df_lancamentos = pd.DataFrame(workbook.worksheet("LANCAMENTOS").get_all_records())
         df_lancamentos['MES_REFERENCIA'] = df_lancamentos['MES_REFERENCIA'].str.split('/').str[0].str.strip()
         
-        # Encontra a coluna de nome no CADASTRO (primeira coluna não vazia)
+        # Encontra a coluna de nome no CADASTRO
         col_nome_cadastro = None
         for col in df_cadastro.columns:
             if 'NOME' in col.upper() or 'ENTREGADOR' in col.upper():
@@ -36,7 +37,6 @@ try:
         if col_nome_cadastro is None:
             col_nome_cadastro = df_cadastro.columns[0]
         
-        # Renomeia para padronizar
         df_cadastro = df_cadastro.rename(columns={col_nome_cadastro: 'NOME_ENTREGADOR'})
         
         # Merge CNPJ
@@ -46,10 +46,13 @@ try:
             how='left'
         )
         
-        # Converter valores para float
+        # Converter valores para float (remove espaços e converte)
         for col in ['VALOR_TOTAL_LINHA', 'VALOR_ADICIONAL', 'VALOR_DESCONTO']:
             if col in df_lancamentos.columns:
-                df_lancamentos[col] = pd.to_numeric(df_lancamentos[col], errors='coerce').fillna(0)
+                df_lancamentos[col] = pd.to_numeric(
+                    df_lancamentos[col].astype(str).str.replace(',', '.'), 
+                    errors='coerce'
+                ).fillna(0)
         
         # Filtros
         with st.sidebar:
@@ -122,31 +125,18 @@ try:
                     <meta charset="UTF-8">
                     <title>Recibo de Pagamento</title>
                     <style>
-                        * {{ margin: 0; padding: 0; }}
-                        body {{ font-family: 'Arial', sans-serif; background: white; }}
-                        @media print {{ body {{ margin: 0; padding: 0; }} }}
-                        .container {{ max-width: 900px; margin: 20px auto; padding: 30px; border: 2px solid #000; }}
-                        .header {{ text-align: center; margin-bottom: 20px; }}
-                        h1 {{ font-size: 24px; font-weight: bold; margin-bottom: 30px; }}
-                        .info-table {{ width: 100%; margin-bottom: 30px; }}
-                        .info-table tr {{ height: 25px; }}
-                        .info-table td {{ padding: 8px; }}
+                        body {{ font-family: Arial, sans-serif; margin: 20px; }}
+                        .container {{ max-width: 900px; margin: 0 auto; padding: 30px; border: 2px solid #000; }}
+                        .header {{ text-align: center; margin-bottom: 30px; }}
+                        h1 {{ font-size: 24px; font-weight: bold; margin: 0; }}
+                        table {{ width: 100%; border-collapse: collapse; margin-bottom: 20px; }}
+                        td {{ padding: 10px; }}
+                        th {{ padding: 10px; text-align: left; font-weight: bold; }}
                         .label {{ font-weight: bold; width: 150px; }}
+                        .border-table {{ border: 1px solid #000; }}
                         .section-title {{ font-weight: bold; font-size: 14px; margin-top: 20px; margin-bottom: 10px; border-bottom: 2px solid #000; padding-bottom: 5px; }}
-                        .resumo-table {{ width: 100%; border-collapse: collapse; margin-bottom: 20px; }}
-                        .resumo-table th {{ background-color: #f0f0f0; border: 1px solid #000; padding: 10px; text-align: left; font-weight: bold; }}
-                        .resumo-table td {{ border: 1px solid #000; padding: 10px; }}
-                        .resumo-table td:last-child {{ text-align: center; }}
-                        .financeiro-table {{ width: 100%; margin-bottom: 30px; }}
-                        .financeiro-table tr {{ height: 28px; }}
-                        .financeiro-table td {{ padding: 8px; }}
-                        .financeiro-table .valor {{ text-align: right; padding-right: 20px; font-weight: bold; }}
-                        .total-row {{ border-top: 2px solid #000; border-bottom: 2px solid #000; background-color: #f9f9f9; }}
-                        .assinatura {{ margin-top: 50px; display: flex; justify-content: space-around; }}
-                        .assinatura-box {{ text-align: center; width: 200px; }}
-                        .assinatura-linha {{ border-bottom: 1px solid #000; height: 40px; margin-bottom: 5px; }}
-                        .assinatura-label {{ font-size: 12px; font-weight: bold; }}
-                        .footer {{ text-align: center; margin-top: 30px; font-size: 11px; color: #666; }}
+                        .valor {{ text-align: right; }}
+                        .total-row {{ border-top: 2px solid #000; border-bottom: 2px solid #000; background-color: #f9f9f9; font-weight: bold; }}
                     </style>
                 </head>
                 <body>
@@ -155,7 +145,7 @@ try:
                             <h1>RECIBO DE PAGAMENTO</h1>
                         </div>
                         
-                        <table class='info-table'>
+                        <table>
                             <tr>
                                 <td class='label'>ENTREGADOR:</td>
                                 <td>{entregador_nome}</td>
@@ -171,20 +161,16 @@ try:
                         </table>
                         
                         <div class='section-title'>RESUMO OPERACIONAL</div>
-                        <table class='resumo-table'>
-                            <thead>
-                                <tr>
-                                    <th>CEP</th>
-                                    <th>QTD ENTREGAS</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {linhas_resumo}
-                            </tbody>
+                        <table class='border-table'>
+                            <tr>
+                                <th>CEP</th>
+                                <th>QTD ENTREGAS</th>
+                            </tr>
+                            {linhas_resumo}
                         </table>
                         
                         <div class='section-title'>RESUMO FINANCEIRO</div>
-                        <table class='financeiro-table'>
+                        <table>
                             <tr>
                                 <td class='label'>TOTAL POR CEP</td>
                                 <td class='valor'>R$ {total_valor:.2f}</td>
@@ -203,18 +189,18 @@ try:
                             </tr>
                         </table>
                         
-                        <div class='assinatura'>
-                            <div class='assinatura-box'>
-                                <div class='assinatura-linha'></div>
-                                <div class='assinatura-label'>ASSINATURA DO ENTREGADOR</div>
+                        <div style='margin-top: 50px; display: flex; justify-content: space-around;'>
+                            <div style='text-align: center; width: 200px;'>
+                                <div style='border-bottom: 1px solid #000; height: 50px; margin-bottom: 10px;'></div>
+                                <div style='font-size: 12px; font-weight: bold;'>ASSINATURA DO ENTREGADOR</div>
                             </div>
-                            <div class='assinatura-box'>
-                                <div class='assinatura-linha'></div>
-                                <div class='assinatura-label'>DATA</div>
+                            <div style='text-align: center; width: 200px;'>
+                                <div style='border-bottom: 1px solid #000; height: 50px; margin-bottom: 10px;'></div>
+                                <div style='font-size: 12px; font-weight: bold;'>DATA</div>
                             </div>
                         </div>
                         
-                        <div class='footer'>
+                        <div style='text-align: center; margin-top: 30px; font-size: 11px; color: #666;'>
                             <p>Gerado em {datetime.now().strftime('%d/%m/%Y às %H:%M')} | GDS Logística</p>
                         </div>
                     </div>
@@ -228,9 +214,6 @@ try:
             
             with col_btn1:
                 if st.button("📄 Gerar Recibo", use_container_width=True, key="gerar_recibo"):
-                    cnpj = df_filtrado['CNPJ'].iloc[0] if 'CNPJ' in df_filtrado.columns else "N/A"
-                    html_recibo = gerar_recibo_html(df_filtrado, entregador, cnpj, mes, quinzena)
-                    st.session_state.html_recibo = html_recibo
                     st.session_state.show_recibo = True
             
             with col_btn2:
@@ -238,7 +221,7 @@ try:
                     cnpj = df_filtrado['CNPJ'].iloc[0] if 'CNPJ' in df_filtrado.columns else "N/A"
                     html_recibo = gerar_recibo_html(df_filtrado, entregador, cnpj, mes, quinzena)
                     st.download_button(
-                        label="Clique aqui para confirmar o download",
+                        label="Clique aqui para confirmar download",
                         data=html_recibo,
                         file_name=f"Recibo_{entregador.replace(' ', '_')}_{mes}_{quinzena}.html",
                         mime="text/html",
@@ -249,18 +232,17 @@ try:
                 if st.button("🖨️ Imprimir", use_container_width=True, key="imprimir"):
                     st.session_state.show_recibo = True
             
-            # Mostra recibo se solicitado
+            # Mostra recibo
             if st.session_state.get("show_recibo"):
                 st.divider()
                 cnpj = df_filtrado['CNPJ'].iloc[0] if 'CNPJ' in df_filtrado.columns else "N/A"
                 html_recibo = gerar_recibo_html(df_filtrado, entregador, cnpj, mes, quinzena)
-                st.markdown(html_recibo, unsafe_allow_html=True)
-                st.info("💡 **Para imprimir como PDF:** Use Ctrl+P (ou Cmd+P no Mac) → Salvar como PDF")
+                components.html(html_recibo, height=1200, scrolling=True)
+                st.info("💡 **Para imprimir como PDF:** Use Ctrl+P → Salvar como PDF")
         else:
             st.warning("⚠️ Nenhum dado encontrado para os filtros selecionados.")
     else:
         raise Exception("Credenciais não encontradas")
         
 except Exception as e:
-    st.error(f"❌ Erro ao conectar: {str(e)}")
-    st.info("Verifique se:\n- Credenciais estão nos Secrets\n- Service account tem permissão 'Editor'\n- Google Sheet está compartilhado com a service account")
+    st.error(f"❌ Erro: {str(e)}")
