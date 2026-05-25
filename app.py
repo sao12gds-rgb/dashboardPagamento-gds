@@ -1,9 +1,7 @@
 import streamlit as st
 import pandas as pd
-
 st.set_page_config(page_title="Dashboard GDS Logística", layout="wide")
 st.title("📊 Dashboard de Pagamento - GDS Logística")
-
 try:
     import gspread
     from google.oauth2.service_account import Credentials
@@ -22,6 +20,9 @@ try:
         
         workbook = client.open_by_key(ID_PLANILHA)
         df_lancamentos = pd.DataFrame(workbook.worksheet("LANCAMENTOS").get_all_records())
+        
+        # 🔧 AQUI: Extrai apenas o mês (antes do "/")
+        df_lancamentos['MES_REFERENCIA'] = df_lancamentos['MES_REFERENCIA'].str.split('/').str[0]
         
         with st.sidebar:
             st.header("🔧 Filtros")
